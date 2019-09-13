@@ -104,6 +104,10 @@ function cgi(cgiBin, options) {
     debug('env: %o', env);
     opts.env = env;
 
+    if (options.nph && options.dupfd) {
+        opts.stdio= [req.connection, req.connection, 'inherit'];
+    }
+    
     var cgiSpawn = spawn(cgiBin, opts.args, opts);
     debug('cgi spawn (pid: %o)', cgiSpawn.pid);
 
@@ -116,18 +120,18 @@ function cgi(cgiBin, options) {
     }
 
     // The request body is piped to 'stdin' of the CGI spawn
-    req.pipe(cgiSpawn.stdin);
-
-    // If `options.stderr` is set to a Stream instance, then re-emit the
-    // 'data' events onto the stream.
-    if (options.stderr) {
-      cgiSpawn.stderr.pipe(options.stderr);
-    }
-
-    // A proper CGI script is supposed to print headers to 'stdout'
-    // followed by a blank line, then a response body.
-    var cgiResult;
     if (!options.nph) {
+      req.pipe(cgiSpawn.stdin);
+
+      // If `options.stderr` is set to a Stream instance, then re-emit the
+      // 'data' events onto the stream.
+      if (options.stderr) {
+        cgiSpawn.stderr.pipe(options.stderr);
+      }
+
+      // A proper CGI script is supposed to print headers to 'stdout'
+      // followed by a blank line, then a response body.
+      var cgiResult;
       cgiResult = new CGIParser(cgiSpawn.stdout);
 
       // When the blank line after the headers has been parsed, then
@@ -146,10 +150,36 @@ function cgi(cgiBin, options) {
         // The response body is piped to the response body of the HTTP request
         cgiResult.pipe(res);
       });
+      
+      cgiSpawn.stdout.on('end', function () {
+        // clean up event listeners upon the "end" event
+        debug('cgi spawn %o stdout "end" event', cgiSpawn.pid);
+        if (cgiResult) {
+          cgiResult.cleanup();
+        }
+        //if (options.stderr) {
+        //  cgiSpawn.stderr.unpipe(options.stderr);
+        //}
+      });
+
     } else {
       // If it's an NPH script, then responsibility of the HTTP response is
       // completely passed off to the child process.
-      cgiSpawn.stdout.pipe(res.connection);
+    
+      if (options.dupfd) {
+        // Close the connection because it is now handled by the child
+        req.connection.destroy();
+      } else {
+        req.pipe(cgiSpawn.stdin);
+        // Setup pipes
+        cgiSpawn.stdout.pipe(res.connection);
+        
+        // If `options.stderr` is set to a Stream instance, then re-emit the
+        // 'data' events onto the stream.
+        if (options.stderr) {
+          cgiSpawn.stderr.pipe(options.stderr);
+        }
+      }
     }
 
     cgiSpawn.on('exit', function(code, signal) {
@@ -186,6 +216,8 @@ cgi.DEFAULTS = {
   nph: false,
   // Set to a `Stream` instance if you want to log stderr of the CGI script somewhere
   stderr: null,
+  // Pass file descriptors of connection to the child (no copy). Probably only work with http connections
+  dupfd: false,
   // A list of arguments for the cgi bin to be used by spawn
   args: []
 };
